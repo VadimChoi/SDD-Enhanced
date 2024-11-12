@@ -1,4 +1,4 @@
-# Self Destructing Downloader (Enhaced)
+# Self Destructing Downloader (Enhanced)
 Это робот для загрузки видео, изображений и голосовых сообщений отправляемых через Telegram, с возможностью самоуничтожения.
 
 Возможности робота:
