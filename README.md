@@ -1,37 +1,50 @@
-# Self Destructing Downloader
-This is a robot for downloading videos and images that are sent through Telegram in a self-destructing way.
+# Self Destructing Downloader (Enhaced)
+Это робот для загрузки видео, изображений и голосовых сообщений отправляемых через Telegram, с возможностью самоуничтожения.
 
-Robot capabilities:
-- High speed in storage
-- Sends a copy to your saved messages
-- Optimal use of resources
+Возможности робота:
+- Высокая скорость в хранилище
+- Отправляет копию сохраненных сообщений
+- Оптимальное использование ресурсов
 
-# Requirements
-- Python (3.5, 3.6, 3.7, 3.8, 3.9, 3.10)
-- Telethon (1.26.1)
+# Требуется
+- Python (Последняя версия)
+- Telethon (Последняя версия)
 
-# Installation
-```
-git clone https://github.com/mahdiashtian/self-destructing-downloader.git
-```
-```
-cd self-destructing-downloader
+# Установка
+Скачайте ZIP архив из раздела Releases и распакуйте его. Затем по очереди выполните эти две команды:
+ ```
+cd Self-Destructing-Downloader-Enhaced
 ```
 ```
 pip install -r requirements.txt
 ```
-# Usage
+# Использование
+Создайте пустой .env файл через CMD:
+```
+type nul > .env
+```
+Или через PowerShell:
+```
+New-Item -Path ".\.env" -ItemType "File"
+```
+Либо через Linux/macOS терминалы:
 ```
 touch .env
 ```
-Open the ".env" file and copy the following information into it:
-```
-API_ID=123456
-API_HASH="35886641ed1bfaa92e7ee30er9888"
-```
-You can get these values from the my.telegram.org site.
 
-Then enter the following command in the terminal and complete the authentication process:
+<br>
+Откройте файл «.env» и скопируйте в него следующую информацию:
+
+```
+API_ID=API_ID_ЗДЕСЬ
+API_HASH="API_HASH_ЗДЕСЬ"
+MY_ID=ВАШ_ID
+```
+Эти значения можно получить на сайте my.telegram.org. ID можно узнать через сторонних ботов либо через веб-версию Telegram
+
+<br>
+
+Затем введите в терминале следующую команду и завершите процесс аутентификации:
 ```
 python main.py
 ```
