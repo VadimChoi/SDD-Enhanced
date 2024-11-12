@@ -13,7 +13,7 @@
 # Установка
 Скачайте ZIP архив из раздела Releases и распакуйте его. Затем по очереди выполните эти две команды:
  ```
-cd Self-Destructing-Downloader-Enhaced
+cd SDD-Enhanced
 ```
 ```
 pip install -r requirements.txt
