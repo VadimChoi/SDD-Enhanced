@@ -300,7 +300,18 @@ async def download_by_link(event) -> None:
             return
 
         parts = event.message.message.split()
-        if len(parts) < 2 or parts[0] != '/download':
+        if len(parts) < 1 or parts[0] != '/download':
+            return
+
+        # Показываем справку если /download отправлен без аргументов
+        if len(parts) < 2:
+            await event.respond(
+                'Использование: /download <ссылка>\n\n'
+                'Примеры:\n'
+                '/download https://t.me/channel/123\n'
+                '/download https://t.me/c/1234567890/123\n'
+                '/download @channel 123'
+            )
             return
 
         if _download_lock.locked():
@@ -418,6 +429,11 @@ async def forward_by_link(event) -> None:
 
                         if message is None:
                             await status.edit('❌ Сообщение не найдено.')
+                            return
+
+                        # Игнорируем медиа от своего аккаунта при пересылке
+                        if message.sender_id == my_id:
+                            await status.edit('❌ Медиафайлы от вашего аккаунта игнорируются.')
                             return
 
                         try:
