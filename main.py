@@ -23,7 +23,7 @@ photo_dir      = os.path.join(media_dir, 'Photo')
 video_dir      = os.path.join(media_dir, 'Video')
 voice_dir      = os.path.join(media_dir, 'Voice')
 roundvideo_dir = os.path.join(media_dir, 'RoundVideo')   # кружочки
-paid_media_dir = os.path.join(media_dir, 'PaidMedia')    # платной контент
+paid_media_dir = os.path.join(media_dir, 'PaidMedia')    # платный контент
 
 for directory in [log_dir, media_dir, photo_dir, video_dir, voice_dir, roundvideo_dir, paid_media_dir]:
     os.makedirs(directory, exist_ok=True)
@@ -273,7 +273,7 @@ async def _download_paid_media_impl(message, folder: str, status_msg=None) -> Op
                     # Это фактический контент — можно скачивать
                     if status_msg:
                         await status_msg.edit(
-                            f'⏳ Скачиваю платной контент {i+1}/{len(extended_media_list)}…'
+                            f'⏳ Скачиваю платный контент {i+1}/{len(extended_media_list)}…'
                         )
 
                     actual_media = ext_media.media
