@@ -1,6 +1,7 @@
 # -*- coding:utf-8 -*-
 import asyncio
 import io
+import json
 import logging
 import os
 import re
@@ -22,8 +23,9 @@ photo_dir      = os.path.join(media_dir, 'Photo')
 video_dir      = os.path.join(media_dir, 'Video')
 voice_dir      = os.path.join(media_dir, 'Voice')
 roundvideo_dir = os.path.join(media_dir, 'RoundVideo')   # кружочки
+paid_media_dir = os.path.join(media_dir, 'PaidMedia')    # платной контент
 
-for directory in [log_dir, media_dir, photo_dir, video_dir, voice_dir, roundvideo_dir]:
+for directory in [log_dir, media_dir, photo_dir, video_dir, voice_dir, roundvideo_dir, paid_media_dir]:
     os.makedirs(directory, exist_ok=True)
 
 # ── Логирование ───────────────────────────────────────────────
@@ -58,6 +60,7 @@ client = TelegramClient(session_file, api_id, api_hash)
 _media_queue   = asyncio.Queue()   # авто-загрузки — строго по одной
 _download_lock = asyncio.Lock()    # один /download за раз
 _forward_lock  = asyncio.Lock()    # один /forward за раз
+_paid_lock     = asyncio.Lock()    # один /paid за раз
 
 # ── Константы ──────────────────────────────────────────────────
 LOCK_TIMEOUT = 300  # 5 минут для операций с блокировками
@@ -87,6 +90,13 @@ def is_self_destructing(message) -> bool:
         return False
     ttl = getattr(message.media, 'ttl_seconds', None)
     return bool(ttl and ttl > 0)
+
+
+def has_paid_media(message) -> bool:
+    """Проверяет наличие платного контента (Telegram Stars)."""
+    if not hasattr(message, 'paid_media') or not message.paid_media:
+        return False
+    return True
 
 
 def parse_link(text: str):
@@ -214,6 +224,78 @@ async def _send_as_copy(target, message, channel, status_msg=None) -> None:
     else:
         if caption:
             await client.send_message(target, caption)
+
+
+async def _download_paid_media(message, folder: str, status_msg=None) -> Optional[str]:
+    """
+    Скачивает платной контент (Telegram Stars).
+    Возвращает путь к файлу или None при ошибке.
+    """
+    try:
+        if not has_paid_media(message):
+            return None
+
+        # Получаем список платных медиа
+        paid_media_list = message.paid_media
+        
+        if not paid_media_list:
+            logger.warning('Платной контент пуст.')
+            return None
+
+        downloaded_files = []
+
+        for i, media in enumerate(paid_media_list):
+            try:
+                if status_msg:
+                    await status_msg.edit(
+                        f'⏳ Скачиваю платной контент {i+1}/{len(paid_media_list)}…'
+                    )
+
+                # Создаём временный буфер для каждого медиа
+                buf = io.BytesIO()
+                await client.download_media(media, file=buf)
+                buf.seek(0)
+
+                # Определяем тип файла и расширение
+                if hasattr(media, 'photo'):
+                    filename = f'{_ts()}_photo_{i}.jpg'
+                elif hasattr(media, 'video'):
+                    filename = f'{_ts()}_video_{i}.mp4'
+                elif hasattr(media, 'document'):
+                    filename = f'{_ts()}_file_{i}'
+                else:
+                    filename = f'{_ts()}_media_{i}'
+
+                file_path = os.path.join(folder, filename)
+                
+                # Сохраняем файл на диск
+                with open(file_path, 'wb') as f:
+                    f.write(buf.getvalue())
+
+                downloaded_files.append(file_path)
+                logger.info(f'Скачан платной контент: {file_path}')
+
+            except Exception as e:
+                logger.error(f'Ошибка скачивания платного медиа {i}: {e}')
+                continue
+
+        if downloaded_files:
+            # Отправляем первый файл или все файлы в Избранное
+            for file_path in downloaded_files:
+                try:
+                    await client.send_file('me', file_path, caption='Платной контент ⭐ @VadimChoi')
+                except Exception as e:
+                    logger.error(f'Ошибка отправки в Избранное: {e}')
+
+            return downloaded_files[0] if downloaded_files else None
+
+        return None
+
+    except Exception as e:
+        logger.error(f'Критическая ошибка при скачивании платного контента: {e}')
+        if status_msg:
+            await status_msg.edit(f'❌ Ошибка: {e}')
+        return None
 
 
 # ════════════════════════════════════════════════════════════════
@@ -464,6 +546,105 @@ async def forward_by_link(event) -> None:
 
 
 # ════════════════════════════════════════════════════════════════
+# /paid <ссылка> — Скачивание платного контента (Telegram Stars)
+# ════════════════════════════════════════════════════════════════
+
+@client.on(events.NewMessage(outgoing=True, pattern=r'^/paid(?:\s+(.+))?$'))
+async def download_paid_media(event) -> None:
+    """
+    Скачивает платной контент (защищённый Telegram Stars).
+    
+    Использование: /paid <ссылка>
+    Примеры:
+      /paid https://t.me/channel/123
+      /paid https://t.me/c/1234567890/456
+      /paid @channel 789
+    """
+    try:
+        if event.chat_id != my_id:
+            return
+
+        arg = (event.pattern_match.group(1) or '').strip()
+        if not arg:
+            await event.respond(
+                '💳 Использование: /paid <ссылка>\n\n'
+                'Скачивает платной контент, защищённый Telegram Stars.\n\n'
+                'Примеры:\n'
+                '/paid https://t.me/channel/123\n'
+                '/paid https://t.me/c/1234567890/456\n'
+                '/paid @channel 789'
+            )
+            return
+
+        if _paid_lock.locked():
+            await event.respond('⏳ Уже выполняется загрузка платного контента, подожди.')
+            return
+
+        try:
+            async with asyncio.timeout(LOCK_TIMEOUT):
+                async with _paid_lock:
+                    entity_raw, msg_id = parse_link(arg)
+                    if entity_raw is None:
+                        await event.respond('❌ Не удалось разобрать ссылку. Проверь формат.')
+                        return
+
+                    status = await event.respond('⏳ Получаю сообщение с платным контентом…')
+
+                    try:
+                        channel = await client.get_entity(entity_raw)
+                        if not channel:
+                            await status.edit('❌ Канал/группа не найдены.')
+                            return
+
+                        message = await client.get_messages(channel, ids=msg_id)
+
+                        if message is None:
+                            await status.edit('❌ Сообщение не найдено.')
+                            return
+
+                        # Проверяем наличие платного контента
+                        if not has_paid_media(message):
+                            await status.edit(
+                                '❌ В этом сообщении нет платного контента (Telegram Stars).\n'
+                                'Возможно, вы уже приобрели этот контент или '
+                                'сообщение защищено другим способом.'
+                            )
+                            return
+
+                        if message.sender_id == my_id:
+                            await status.edit('❌ Платной контент от вашего аккаунта игнорируется.')
+                            return
+
+                        # Скачиваем платной контент
+                        file_path = await _download_paid_media(
+                            message,
+                            paid_media_dir,
+                            status_msg=status
+                        )
+
+                        if file_path:
+                            await status.edit(
+                                '✅ Платной контент скачан и отправлен в Избранное!\n'
+                                f'📁 Папка: {paid_media_dir}'
+                            )
+                            logger.info(f'Скачан платной контент: {file_path}')
+                        else:
+                            await status.edit('❌ Не удалось скачать платной контент.')
+                            logger.error('Ошибка: не удалось скачать платной контент')
+
+                    except Exception as e:
+                        await status.edit(f'❌ Ошибка: {str(e)[:100]}')
+                        logger.error(f'Ошибка /paid: {e}')
+
+        except asyncio.TimeoutError:
+            logger.error('Операция /paid превысила лимит времени (5 мин)')
+            await event.respond('❌ Операция заняла слишком много времени.')
+
+    except Exception as e:
+        logger.error(f'Необработанная ошибка /paid: {e}')
+
+
+# ════════════════════════════════════════════════════════════════
 # Запуск
 # ════════════════════════════════════════════════════════════════
 
@@ -473,6 +654,7 @@ async def main() -> None:
         await client.start()
         asyncio.create_task(_media_worker())
         logger.info('Клиент запущен. Воркер медиа-очереди активен.')
+        logger.info('Доступные команды: /download, /forward, /paid')
         await client.run_until_disconnected()
     except errors.SessionRevokedError:
         logger.error('Сессия отозвана, авторизуйтесь заново.')
