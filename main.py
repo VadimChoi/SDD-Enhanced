@@ -14,7 +14,7 @@ from typing import Callable, List, Optional
 from decouple import config
 from telethon import TelegramClient, errors, events
 from telethon.errors import ChatForwardsRestrictedError
-from telethon.tl.types import MessageMediaDocument, MessageMediaPhoto
+from telethon.tl.types import MessageMediaDocument, MessageMediaPhoto, MessageMediaPaidMedia
 
 # ── Директории ────────────────────────────────────────────────
 log_dir        = 'Logs'
@@ -94,9 +94,9 @@ def is_self_destructing(message) -> bool:
 
 def has_paid_media(message) -> bool:
     """Проверяет наличие платного контента (Telegram Stars)."""
-    if not hasattr(message, 'paid_media') or not message.paid_media:
+    if not message.media:
         return False
-    return True
+    return isinstance(message.media, MessageMediaPaidMedia)
 
 
 def parse_link(text: str):
@@ -226,75 +226,137 @@ async def _send_as_copy(target, message, channel, status_msg=None) -> None:
             await client.send_message(target, caption)
 
 
-async def _download_paid_media(message, folder: str, status_msg=None) -> Optional[str]:
+async def _download_paid_media_impl(message, folder: str, status_msg=None) -> Optional[str]:
     """
-    Скачивает платной контент (Telegram Stars).
-    Возвращает путь к файлу или None при ошибке.
+    Скачивает платной контент используя extended_media.
+    Правильно обрабатывает разницу между:
+    - MessageExtendedMediaPreview (превью, контент заблокирован)
+    - MessageExtendedMedia (фактический контент, уже куплено)
     """
     try:
-        if not has_paid_media(message):
+        if not isinstance(message.media, MessageMediaPaidMedia):
+            logger.warning('Медиа не является платным контентом.')
             return None
 
-        # Получаем список платных медиа
-        paid_media_list = message.paid_media
+        paid_media = message.media
+        extended_media_list = paid_media.extended_media
+        stars_amount = paid_media.stars_amount
         
-        if not paid_media_list:
-            logger.warning('Платной контент пуст.')
+        if not extended_media_list:
+            logger.warning('extended_media пусто.')
             return None
+
+        logger.info(f'💳 Платной контент: {stars_amount} ⭐, элементов: {len(extended_media_list)}')
 
         downloaded_files = []
 
-        for i, media in enumerate(paid_media_list):
+        for i, ext_media in enumerate(extended_media_list):
             try:
-                if status_msg:
-                    await status_msg.edit(
-                        f'⏳ Скачиваю платной контент {i+1}/{len(paid_media_list)}…'
+                # Проверяем тип extended_media
+                from telethon.tl.types import MessageExtendedMediaPreview, MessageExtendedMedia
+
+                if isinstance(ext_media, MessageExtendedMediaPreview):
+                    # Это превью — контент ещё не куплен
+                    logger.warning(
+                        f'Элемент {i+1}: это превью (контент заблокирован). '
+                        f'Размер: {ext_media.w}x{ext_media.h}, '
+                        f'видео: {ext_media.video_duration}s'
                     )
+                    if status_msg:
+                        await status_msg.edit(
+                            f'⚠️ Элемент {i+1}/{len(extended_media_list)}: '
+                            f'превью (контент заблокирован, нужна оплата)'
+                        )
+                    continue
 
-                # Создаём временный буфер для каждого медиа
-                buf = io.BytesIO()
-                await client.download_media(media, file=buf)
-                buf.seek(0)
+                elif isinstance(ext_media, MessageExtendedMedia):
+                    # Это фактический контент — можно скачивать
+                    if status_msg:
+                        await status_msg.edit(
+                            f'⏳ Скачиваю платной контент {i+1}/{len(extended_media_list)}…'
+                        )
 
-                # Определяем тип файла и расширение
-                if hasattr(media, 'photo'):
-                    filename = f'{_ts()}_photo_{i}.jpg'
-                elif hasattr(media, 'video'):
-                    filename = f'{_ts()}_video_{i}.mp4'
-                elif hasattr(media, 'document'):
-                    filename = f'{_ts()}_file_{i}'
+                    actual_media = ext_media.media
+
+                    if isinstance(actual_media, MessageMediaPhoto):
+                        # Фото
+                        filename = f'{_ts()}_photo_{i}.jpg'
+                        file_path = os.path.join(folder, filename)
+                        
+                        await client.download_media(
+                            actual_media,
+                            file=file_path,
+                            progress_callback=_make_progress_cb(status_msg, f'Фото {i+1}')
+                        )
+                        
+                        downloaded_files.append(file_path)
+                        logger.info(f'✅ Скачано фото: {file_path}')
+
+                    elif isinstance(actual_media, MessageMediaDocument):
+                        # Видео или документ
+                        doc = actual_media.document
+                        
+                        # Определяем тип документа
+                        is_video = False
+                        filename = f'{_ts()}_file_{i}'
+                        
+                        for attr in doc.attributes:
+                            if hasattr(attr, 'file_name') and attr.file_name:
+                                filename = attr.file_name
+                            if hasattr(attr, 'duration'):  # DocumentAttributeVideo
+                                is_video = True
+                                if not filename.endswith(('.mp4', '.mov', '.avi')):
+                                    filename = f'{_ts()}_video_{i}.mp4'
+
+                        file_path = os.path.join(folder, filename)
+                        
+                        await client.download_media(
+                            actual_media,
+                            file=file_path,
+                            progress_callback=_make_progress_cb(status_msg, f'Медиа {i+1}')
+                        )
+                        
+                        downloaded_files.append(file_path)
+                        logger.info(f'✅ Скачано: {file_path}')
+                    else:
+                        logger.warning(f'Элемент {i}: неизвестный тип медиа')
+                        continue
+
                 else:
-                    filename = f'{_ts()}_media_{i}'
-
-                file_path = os.path.join(folder, filename)
-                
-                # Сохраняем файл на диск
-                with open(file_path, 'wb') as f:
-                    f.write(buf.getvalue())
-
-                downloaded_files.append(file_path)
-                logger.info(f'Скачан платной контент: {file_path}')
+                    logger.warning(f'Элемент {i}: неизвестный тип extended_media')
+                    continue
 
             except Exception as e:
-                logger.error(f'Ошибка скачивания платного медиа {i}: {e}')
+                logger.error(f'Ошибка при скачивании элемента {i}: {e}')
+                if status_msg:
+                    try:
+                        await status_msg.edit(f'⚠️ Ошибка при скачивании {i+1}: {str(e)[:50]}')
+                    except:
+                        pass
                 continue
 
+        # Отправляем все скачанные файлы в Избранное
         if downloaded_files:
-            # Отправляем первый файл или все файлы в Избранное
             for file_path in downloaded_files:
                 try:
-                    await client.send_file('me', file_path, caption='Платной контент ⭐ @VadimChoi')
+                    await client.send_file(
+                        'me',
+                        file_path,
+                        caption=f'💳 Платной контент ({stars_amount}⭐) @VadimChoi'
+                    )
+                    logger.info(f'Отправлено в Избранное: {os.path.basename(file_path)}')
                 except Exception as e:
-                    logger.error(f'Ошибка отправки в Избранное: {e}')
+                    logger.error(f'Ошибка при отправке в Избранное: {e}')
 
-            return downloaded_files[0] if downloaded_files else None
-
-        return None
+            return downloaded_files[0]
+        else:
+            logger.warning('Не удалось скачать ни один файл (возможно, только превью)')
+            return None
 
     except Exception as e:
         logger.error(f'Критическая ошибка при скачивании платного контента: {e}')
         if status_msg:
-            await status_msg.edit(f'❌ Ошибка: {e}')
+            await status_msg.edit(f'❌ Ошибка: {str(e)[:100]}')
         return None
 
 
@@ -553,6 +615,7 @@ async def forward_by_link(event) -> None:
 async def download_paid_media(event) -> None:
     """
     Скачивает платной контент (защищённый Telegram Stars).
+    Правильно обрабатывает extended_media (превью vs фактический контент).
     
     Использование: /paid <ссылка>
     Примеры:
@@ -572,7 +635,8 @@ async def download_paid_media(event) -> None:
                 'Примеры:\n'
                 '/paid https://t.me/channel/123\n'
                 '/paid https://t.me/c/1234567890/456\n'
-                '/paid @channel 789'
+                '/paid @channel 789\n\n'
+                '⚠️ Примечание: если видите только превью — контент ещё не куплен.'
             )
             return
 
@@ -602,12 +666,10 @@ async def download_paid_media(event) -> None:
                             await status.edit('❌ Сообщение не найдено.')
                             return
 
-                        # Проверяем наличие платного контента
+                        # Проверяем наличие платного ��онтента
                         if not has_paid_media(message):
                             await status.edit(
-                                '❌ В этом сообщении нет платного контента (Telegram Stars).\n'
-                                'Возможно, вы уже приобрели этот контент или '
-                                'сообщение защищено другим способом.'
+                                '❌ В этом сообщении нет платного контента (Telegram Stars).'
                             )
                             return
 
@@ -616,7 +678,7 @@ async def download_paid_media(event) -> None:
                             return
 
                         # Скачиваем платной контент
-                        file_path = await _download_paid_media(
+                        file_path = await _download_paid_media_impl(
                             message,
                             paid_media_dir,
                             status_msg=status
@@ -625,12 +687,15 @@ async def download_paid_media(event) -> None:
                         if file_path:
                             await status.edit(
                                 '✅ Платной контент скачан и отправлен в Избранное!\n'
-                                f'📁 Папка: {paid_media_dir}'
+                                f'📁 {paid_media_dir}'
                             )
-                            logger.info(f'Скачан платной контент: {file_path}')
+                            logger.info(f'✅ Успешно скачан платной контент: {file_path}')
                         else:
-                            await status.edit('❌ Не удалось скачать платной контент.')
-                            logger.error('Ошибка: не удалось скачать платной контент')
+                            await status.edit(
+                                '⚠️ Контент может содержать только превью (не куплено).\n'
+                                'Или возникла ошибка при скачивании.'
+                            )
+                            logger.warning('Платной контент не скачан (возможно только превью)')
 
                     except Exception as e:
                         await status.edit(f'❌ Ошибка: {str(e)[:100]}')
