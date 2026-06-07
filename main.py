@@ -4,6 +4,7 @@ import io
 import logging
 import os
 import re
+import sys
 import time
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
@@ -57,6 +58,9 @@ client = TelegramClient(session_file, api_id, api_hash)
 _media_queue   = asyncio.Queue()   # авто-загрузки — строго по одной
 _download_lock = asyncio.Lock()    # один /download за раз
 _forward_lock  = asyncio.Lock()    # один /forward за раз
+
+# ── Константы ──────────────────────────────────────────────────
+LOCK_TIMEOUT = 300  # 5 минут для операций с блокировками
 
 
 # ════════════════════════════════════════════════════════════════
@@ -128,8 +132,10 @@ def _make_progress_cb(status_msg, label: str = 'Скачиваю') -> Callable:
         bar = '█' * (pct // 10) + '░' * (10 - pct // 10)
         try:
             await status_msg.edit(f'⏳ {label}… {bar} {pct}%')
-        except Exception:
-            pass  # FloodWait и прочее — молча пропускаем
+        except (errors.FloodWaitError, errors.TimeLimitError):
+            pass  # Только rate-limit ошибки молча пропускаем
+        except Exception as e:
+            logger.debug(f'Ошибка обновления прогресса: {e}')
 
     return _cb
 
@@ -161,14 +167,16 @@ async def _download_to_buf(msg, progress_cb=None) -> Optional[io.BytesIO]:
 
 
 async def _fetch_album(channel, message) -> List:
-    """Собирает все сообщения альбома по grouped_id."""
+    """Собирает все сообщения альбома по grouped_id (оптимизированный поиск)."""
     if not message.grouped_id:
         return [message]
+    
+    # Расширенное окно поиска для больших альбомов
     nearby = await client.get_messages(
         channel,
-        min_id=message.id - 20,
-        max_id=message.id + 20,
-        limit=40,
+        min_id=max(1, message.id - 50),
+        max_id=message.id + 50,
+        limit=100,
     )
     album = [m for m in nearby if m.grouped_id == message.grouped_id]
     album.sort(key=lambda m: m.id)
@@ -299,57 +307,67 @@ async def download_by_link(event) -> None:
             await event.respond('⏳ Уже выполняется загрузка, подожди.')
             return
 
-        async with _download_lock:
-            entity_raw, message_id = parse_link(parts[1])
+        try:
+            async with asyncio.timeout(LOCK_TIMEOUT):
+                async with _download_lock:
+                    entity_raw, message_id = parse_link(parts[1])
 
-            if entity_raw is None:
-                await event.respond(
-                    '❌ Не удалось разобрать ссылку.\n'
-                    'Формат: /download https://t.me/channel/123'
-                )
-                return
+                    if entity_raw is None:
+                        await event.respond(
+                            '❌ Не удалось разобрать ссылку.\n'
+                            'Формат: /download https://t.me/channel/123'
+                        )
+                        return
 
-            status = await event.respond('⏳ Получаю сообщение…')
+                    status = await event.respond('⏳ Получаю сообщение…')
 
-            try:
-                chat    = await client.get_entity(entity_raw)
-                message = await client.get_messages(chat, ids=message_id)
+                    try:
+                        chat = await client.get_entity(entity_raw)
+                        if not chat:
+                            await status.edit('❌ Канал/группа не найдены.')
+                            return
 
-                if not message:
-                    await status.edit('❌ Сообщение не найдено.')
-                    return
+                        message = await client.get_messages(chat, ids=message_id)
 
-                if not (message.photo or message.video or message.voice or message.video_note):
-                    await status.edit('❌ В сообщении нет медиа (фото/видео/голосовое/кружочек).')
-                    return
+                        if not message:
+                            await status.edit('❌ Сообщение не найдено.')
+                            return
 
-                if message.sender_id == my_id:
-                    await status.edit('❌ Медиафайлы от вашего аккаунта игнорируются.')
-                    return
+                        if not (message.photo or message.video or message.voice or message.video_note):
+                            await status.edit('❌ В сообщении нет медиа (фото/видео/голосовое/кружочек).')
+                            return
 
-                if message.photo:
-                    folder = photo_dir
-                elif message.video:
-                    folder = video_dir
-                elif message.voice:
-                    folder = voice_dir
-                elif message.video_note:
-                    folder = roundvideo_dir
-                else:
-                    await status.edit('❌ Неизвестный тип медиафайла.')
-                    return
+                        if message.sender_id == my_id:
+                            await status.edit('❌ Медиафайлы от вашего аккаунта игнорируются.')
+                            return
 
-                file_path = await message.download_media(
-                    file=os.path.join(folder, _ts()),
-                    progress_callback=_make_progress_cb(status),
-                )
-                await client.send_file('me', file_path, caption='Скачано @VadimChoi')
-                await status.edit('✅ Скачано и отправлено в Избранное.')
-                logger.info(f'Скачано по ссылке: {file_path}')
+                        if message.photo:
+                            folder = photo_dir
+                        elif message.video:
+                            folder = video_dir
+                        elif message.voice:
+                            folder = voice_dir
+                        elif message.video_note:
+                            folder = roundvideo_dir
+                        else:
+                            await status.edit('❌ Неизвестный тип медиафайла.')
+                            return
 
-            except Exception as e:
-                await status.edit(f'❌ Ошибка: {e}')
-                logger.error(f'Ошибка /download: {e}')
+                        file_path = await message.download_media(
+                            file=os.path.join(folder, _ts()),
+                            progress_callback=_make_progress_cb(status),
+                        )
+                        await client.send_file('me', file_path, caption='Скачано @VadimChoi')
+                        await status.edit('✅ Скачано и отправлено в Избранное.')
+                        logger.info(f'Скачано по ссылке: {file_path}')
+
+                    except Exception as e:
+                        await status.edit(f'❌ Ошибка: {e}')
+                        logger.error(f'Ошибка /download: {e}')
+
+        except asyncio.TimeoutError:
+            logger.error('Операция /download превысила лимит времени (5 мин)')
+            await event.respond('❌ Операция заняла слишком много времени.')
 
     except Exception as e:
         logger.error(f'Необработанная ошибка /download: {e}')
@@ -380,40 +398,50 @@ async def forward_by_link(event) -> None:
             await event.respond('⏳ Уже выполняется пересылка, подожди.')
             return
 
-        async with _forward_lock:
-            entity_raw, msg_id = parse_link(arg)
-            if entity_raw is None:
-                await event.respond('❌ Не удалось разобрать ссылку. Проверь формат.')
-                return
+        try:
+            async with asyncio.timeout(LOCK_TIMEOUT):
+                async with _forward_lock:
+                    entity_raw, msg_id = parse_link(arg)
+                    if entity_raw is None:
+                        await event.respond('❌ Не удалось разобрать ссылку. Проверь формат.')
+                        return
 
-            status = await event.respond('⏳ Получаю пост…')
+                    status = await event.respond('⏳ Получаю пост…')
 
-            try:
-                channel = await client.get_entity(entity_raw)
-                message = await client.get_messages(channel, ids=msg_id)
+                    try:
+                        channel = await client.get_entity(entity_raw)
+                        if not channel:
+                            await status.edit('❌ Канал/группа не найдены.')
+                            return
 
-                if message is None:
-                    await status.edit('❌ Сообщение не найдено.')
-                    return
+                        message = await client.get_messages(channel, ids=msg_id)
 
-                try:
-                    await client.forward_messages(
-                        entity=my_id,
-                        messages=message,
-                        from_peer=channel,
-                    )
-                    await status.edit('✅ Переслано!')
-                    logger.info(f'Переслан пост {entity_raw}/{msg_id}')
+                        if message is None:
+                            await status.edit('❌ Сообщение не найдено.')
+                            return
 
-                except ChatForwardsRestrictedError:
-                    await status.edit('⏳ Канал с запретом, копирую медиа…')
-                    await _send_as_copy(my_id, message, channel, status_msg=status)
-                    await status.edit('✅ Скопировано (запрет обойдён).')
-                    logger.info(f'Скопирован пост {entity_raw}/{msg_id} (noforwards обход)')
+                        try:
+                            await client.forward_messages(
+                                entity=my_id,
+                                messages=message,
+                                from_peer=channel,
+                            )
+                            await status.edit('✅ Переслано!')
+                            logger.info(f'Переслан пост {entity_raw}/{msg_id}')
 
-            except Exception as e:
-                await status.edit(f'❌ Ошибка: {e}')
-                logger.error(f'Ошибка /forward: {e}')
+                        except ChatForwardsRestrictedError:
+                            await status.edit('⏳ Канал с запретом, копирую медиа…')
+                            await _send_as_copy(my_id, message, channel, status_msg=status)
+                            await status.edit('✅ Скопировано (запрет обойдён).')
+                            logger.info(f'Скопирован пост {entity_raw}/{msg_id} (noforwards обход)')
+
+                    except Exception as e:
+                        await status.edit(f'❌ Ошибка: {e}')
+                        logger.error(f'Ошибка /forward: {e}')
+
+        except asyncio.TimeoutError:
+            logger.error('Операция /forward превысила лимит времени (5 мин)')
+            await event.respond('❌ Операция заняла слишком много времени.')
 
     except Exception as e:
         logger.error(f'Необработанная ошибка /forward: {e}')
