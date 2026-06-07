@@ -228,7 +228,7 @@ async def _send_as_copy(target, message, channel, status_msg=None) -> None:
 
 async def _download_paid_media_impl(message, folder: str, status_msg=None) -> Optional[str]:
     """
-    Скачивает платной контент используя extended_media.
+    Скачивает платный контент используя extended_media.
     Правильно обрабатывает разницу между:
     - MessageExtendedMediaPreview (превью, контент заблокирован)
     - MessageExtendedMedia (фактический контент, уже куплено)
@@ -677,7 +677,7 @@ async def download_paid_media(event) -> None:
                             await status.edit('❌ Платный контент от вашего аккаунта игнорируется.')
                             return
 
-                        # Скачиваем платной контент
+                        # Скачиваем платный контент
                         file_path = await _download_paid_media_impl(
                             message,
                             paid_media_dir,
@@ -689,7 +689,7 @@ async def download_paid_media(event) -> None:
                                 '✅ Платный контент скачан и отправлен в Избранное!\n'
                                 f'📁 {paid_media_dir}'
                             )
-                            logger.info(f'✅ Успешно скачан платной контент: {file_path}')
+                            logger.info(f'✅ Успешно скачан платный контент: {file_path}')
                         else:
                             await status.edit(
                                 '⚠️ Контент может содержать только превью (не куплено).\n'
