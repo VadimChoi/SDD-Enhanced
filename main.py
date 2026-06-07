@@ -246,7 +246,7 @@ async def _download_paid_media_impl(message, folder: str, status_msg=None) -> Op
             logger.warning('extended_media пусто.')
             return None
 
-        logger.info(f'💳 Платной контент: {stars_amount} ⭐, элементов: {len(extended_media_list)}')
+        logger.info(f'💳 Платный контент: {stars_amount} ⭐, элементов: {len(extended_media_list)}')
 
         downloaded_files = []
 
@@ -342,7 +342,7 @@ async def _download_paid_media_impl(message, folder: str, status_msg=None) -> Op
                     await client.send_file(
                         'me',
                         file_path,
-                        caption=f'💳 Платной контент ({stars_amount}⭐) @VadimChoi'
+                        caption=f'💳 Платный контент ({stars_amount}⭐) @VadimChoi'
                     )
                     logger.info(f'Отправлено в Избранное: {os.path.basename(file_path)}')
                 except Exception as e:
@@ -614,7 +614,7 @@ async def forward_by_link(event) -> None:
 @client.on(events.NewMessage(outgoing=True, pattern=r'^/paid(?:\s+(.+))?$'))
 async def download_paid_media(event) -> None:
     """
-    Скачивает платной контент (защищённый Telegram Stars).
+    Скачивает платный контент (защищённый Telegram Stars).
     Правильно обрабатывает extended_media (превью vs фактический контент).
     
     Использование: /paid <ссылка>
@@ -631,7 +631,7 @@ async def download_paid_media(event) -> None:
         if not arg:
             await event.respond(
                 '💳 Использование: /paid <ссылка>\n\n'
-                'Скачивает платной контент, защищённый Telegram Stars.\n\n'
+                'Скачивает платный контент, защищённый Telegram Stars.\n\n'
                 'Примеры:\n'
                 '/paid https://t.me/channel/123\n'
                 '/paid https://t.me/c/1234567890/456\n'
@@ -674,7 +674,7 @@ async def download_paid_media(event) -> None:
                             return
 
                         if message.sender_id == my_id:
-                            await status.edit('❌ Платной контент от вашего аккаунта игнорируется.')
+                            await status.edit('❌ Платный контент от вашего аккаунта игнорируется.')
                             return
 
                         # Скачиваем платной контент
@@ -686,7 +686,7 @@ async def download_paid_media(event) -> None:
 
                         if file_path:
                             await status.edit(
-                                '✅ Платной контент скачан и отправлен в Избранное!\n'
+                                '✅ Платный контент скачан и отправлен в Избранное!\n'
                                 f'📁 {paid_media_dir}'
                             )
                             logger.info(f'✅ Успешно скачан платной контент: {file_path}')
