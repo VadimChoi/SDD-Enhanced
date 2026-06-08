@@ -666,7 +666,7 @@ async def download_paid_media(event) -> None:
                             await status.edit('❌ Сообщение не найдено.')
                             return
 
-                        # Проверяем наличие платного ��онтента
+                        # Проверяем наличие платного контента
                         if not has_paid_media(message):
                             await status.edit(
                                 '❌ В этом сообщении нет платного контента (Telegram Stars).'
@@ -695,7 +695,7 @@ async def download_paid_media(event) -> None:
                                 '⚠️ Контент может содержать только превью (не куплено).\n'
                                 'Или возникла ошибка при скачивании.'
                             )
-                            logger.warning('Платной контент не скачан (возможно только превью)')
+                            logger.warning('Платный контент не скачан (возможно только превью)')
 
                     except Exception as e:
                         await status.edit(f'❌ Ошибка: {str(e)[:100]}')
