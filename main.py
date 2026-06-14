@@ -15,6 +15,7 @@ from decouple import config
 from telethon import TelegramClient, errors, events
 from telethon.errors import ChatForwardsRestrictedError
 from telethon.tl.types import MessageMediaDocument, MessageMediaPhoto, MessageMediaPaidMedia
+from telethon.tl.functions.stories import GetStoriesByIDRequest
 
 # ── Директории ────────────────────────────────────────────────
 log_dir        = 'Logs'
@@ -24,8 +25,9 @@ video_dir      = os.path.join(media_dir, 'Video')
 voice_dir      = os.path.join(media_dir, 'Voice')
 roundvideo_dir = os.path.join(media_dir, 'RoundVideo')   # кружочки
 paid_media_dir = os.path.join(media_dir, 'PaidMedia')    # платный контент
+stories_dir    = os.path.join(media_dir, 'Stories')      # stories
 
-for directory in [log_dir, media_dir, photo_dir, video_dir, voice_dir, roundvideo_dir, paid_media_dir]:
+for directory in [log_dir, media_dir, photo_dir, video_dir, voice_dir, roundvideo_dir, paid_media_dir, stories_dir]:
     os.makedirs(directory, exist_ok=True)
 
 # ── Логирование ───────────────────────────────────────────────
@@ -61,6 +63,7 @@ _media_queue   = asyncio.Queue()   # авто-загрузки — строго 
 _download_lock = asyncio.Lock()    # один /download за раз
 _forward_lock  = asyncio.Lock()    # один /forward за раз
 _paid_lock     = asyncio.Lock()    # один /paid за раз
+_story_lock    = asyncio.Lock()    # один /story за раз
 
 # ── Константы ──────────────────────────────────────────────────
 LOCK_TIMEOUT = 300  # 5 минут для операций с блокировками
@@ -117,6 +120,27 @@ def parse_link(text: str):
     if m:
         return m.group(1), int(m.group(2))
     m = re.match(r'@?([A-Za-z0-9_]+)\s+(\d+)$', text)
+    if m:
+        return m.group(1), int(m.group(2))
+    return None, None
+
+
+def parse_story_link(text: str):
+    """
+    Парсер ссылок на stories.
+    Возвращает (username, story_id) или (None, None).
+
+    Форматы:
+      https://t.me/username/s/123      — story ссылка
+      @username s 123                  — короткая форма
+    """
+    text = text.strip()
+    # Формат: https://t.me/username/s/story_id
+    m = re.match(r'https?://t\.me/([A-Za-z0-9_]+)/s/(\d+)', text)
+    if m:
+        return m.group(1), int(m.group(2))
+    # Формат: @username s story_id
+    m = re.match(r'@?([A-Za-z0-9_]+)\s+s\s+(\d+)$', text)
     if m:
         return m.group(1), int(m.group(2))
     return None, None
@@ -390,7 +414,7 @@ async def _process_auto_media(event) -> None:
 
         elif event.video_note:
             if not is_self_destructing(event.message):
-                logger.info('Видео-кружочек не самоуничтожающийся, пропускаем.')
+                logger.info('Видео-кружочек не самоуничтожающийский, пропускаем.')
                 return
             folder = roundvideo_dir
 
@@ -608,6 +632,127 @@ async def forward_by_link(event) -> None:
 
 
 # ════════════════════════════════════════════════════════════════
+# /story <ссылка> — Скачивание Stories
+# ════════════════════════════════════════════════════════════════
+
+@client.on(events.NewMessage(outgoing=True, pattern=r'^/story(?:\s+(.+))?$'))
+async def download_story(event) -> None:
+    """
+    Скачивает Telegram Stories по ссылке.
+    
+    Использование: /story <ссылка>
+    Примеры:
+      /story https://t.me/username/s/123
+      /story @username s 123
+    """
+    try:
+        if event.chat_id != my_id:
+            return
+
+        arg = (event.pattern_match.group(1) or '').strip()
+        if not arg:
+            await event.respond(
+                '📖 Использование: /story <ссылка>\n\n'
+                'Скачивает Telegram Stories.\n\n'
+                'Примеры:\n'
+                '/story https://t.me/username/s/123\n'
+                '/story @username s 123'
+            )
+            return
+
+        if _story_lock.locked():
+            await event.respond('⏳ Уже выполняется загрузка story, подожди.')
+            return
+
+        try:
+            async with asyncio.timeout(LOCK_TIMEOUT):
+                async with _story_lock:
+                    username, story_id = parse_story_link(arg)
+                    if username is None or story_id is None:
+                        await event.respond('❌ Не удалось разобрать ссылку на story. Проверь формат.')
+                        return
+
+                    status = await event.respond(f'⏳ Получаю story {story_id} от @{username}…')
+
+                    try:
+                        # Получаем сущность пользователя/канала
+                        peer = await client.get_entity(username)
+                        if not peer:
+                            await status.edit(f'❌ Не найден пользователь/канал @{username}.')
+                            return
+
+                        # Используем GetStoriesByIDRequest для получения story
+                        await status.edit(f'⏳ Загружаю story {story_id}…')
+                        
+                        result = await client(GetStoriesByIDRequest(
+                            peer=peer,
+                            id=[story_id]
+                        ))
+
+                        if not result.stories:
+                            await status.edit(f'❌ Story не найдена или истекла.')
+                            logger.warning(f'Story {story_id} от @{username} не найдена')
+                            return
+
+                        story = result.stories[0]
+                        
+                        # Проверяем наличие медиа
+                        if not hasattr(story, 'media') or not story.media:
+                            await status.edit('❌ В story нет медиа.')
+                            logger.warning(f'Story {story_id} не содержит медиа')
+                            return
+
+                        # Скачиваем медиа
+                        await status.edit(f'⏳ Скачиваю медиа из story…')
+                        
+                        # Определяем расширение
+                        story_media = story.media
+                        if hasattr(story_media, 'photo'):
+                            ext = '.jpg'
+                            label = 'фото'
+                        elif hasattr(story_media, 'document'):
+                            ext = '.mp4'
+                            label = 'видео'
+                        else:
+                            ext = ''
+                            label = 'медиа'
+
+                        filename = f'{_ts()}_story_{story_id}{ext}'
+                        file_path = os.path.join(stories_dir, filename)
+
+                        # Скачиваем с прогресс-баром
+                        await client.download_media(
+                            story.media,
+                            file=file_path,
+                            progress_callback=_make_progress_cb(status, f'Скачиваю {label}')
+                        )
+
+                        # Отправляем в Избранное
+                        caption = f'📖 Story #{story_id} от @{username}'
+                        if hasattr(story, 'caption') and story.caption:
+                            caption += f'\n\n{story.caption}'
+
+                        await client.send_file('me', file_path, caption=caption)
+                        
+                        await status.edit(
+                            f'✅ Story скачана и отправлена в Избранное!\n'
+                            f'📁 {stories_dir}'
+                        )
+                        logger.info(f'✅ Скачана story: {file_path}')
+
+                    except Exception as e:
+                        await status.edit(f'❌ Ошибка: {str(e)[:100]}')
+                        logger.error(f'Ошибка при скачивании story: {e}')
+
+        except asyncio.TimeoutError:
+            logger.error('Операция /story превысила лимит времени (5 мин)')
+            await event.respond('❌ Операция заняла слишком много времени.')
+
+    except Exception as e:
+        logger.error(f'Необработанная ошибка /story: {e}')
+
+
+# ════════════════════════════════════════════════════════════════
 # /paid <ссылка> — Скачивание платного контента (Telegram Stars)
 # ════════════════════════════════════════════════════════════════
 
@@ -719,7 +864,7 @@ async def main() -> None:
         await client.start()
         asyncio.create_task(_media_worker())
         logger.info('Клиент запущен. Воркер медиа-очереди активен.')
-        logger.info('Доступные команды: /download, /forward, /paid')
+        logger.info('Доступные команды: /download, /forward, /story, /paid')
         await client.run_until_disconnected()
     except errors.SessionRevokedError:
         logger.error('Сессия отозвана, авторизуйтесь заново.')
